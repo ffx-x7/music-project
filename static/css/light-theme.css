@@ -1,0 +1,148 @@
+/* Light Theme */
+:root {
+    /* Colors */
+    --primary: #7C3AED;
+    --primary-dark: #6D28D9;
+    --primary-light: #8B5CF6;
+    --secondary: #0DA674;
+    --secondary-dark: #059669;
+    --danger: #DC2626;
+    --warning: #D97706;
+    --info: #2563EB;
+    
+    /* Backgrounds */
+    --bg-primary: #FFFFFF;
+    --bg-secondary: #F8FAFC;
+    --bg-tertiary: #F1F5F9;
+    --bg-card: rgba(255, 255, 255, 0.9);
+    --bg-glass: rgba(255, 255, 255, 0.8);
+    --bg-hover: rgba(0, 0, 0, 0.05);
+    
+    /* Text */
+    --text-primary: #1E293B;
+    --text-secondary: #475569;
+    --text-muted: #64748B;
+    
+    /* Borders */
+    --border-color: rgba(0, 0, 0, 0.1);
+    --border-light: rgba(0, 0, 0, 0.05);
+    
+    /* Shadows */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
+    --shadow-md: 0 6px 10px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+    --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.15);
+    
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, var(--primary), var(--primary-dark));
+    --gradient-secondary: linear-gradient(135deg, var(--secondary), var(--secondary-dark));
+    --gradient-purple: linear-gradient(135deg, #7C3AED, #DB2777);
+    --gradient-blue: linear-gradient(135deg, #2563EB, #0891B2);
+    --gradient-green: linear-gradient(135deg, #0DA674, #65A30D);
+    
+    /* Same transitions and radius as dark theme */
+}
+
+/* Base Styles */
+body {
+    background: linear-gradient(135deg, #F8FAFC 0%, #E2E8F0 100%);
+    color: var(--text-primary);
+}
+
+/* Glass Effect - Lighter */
+.glass {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+/* Cards - More subtle */
+.card {
+    background: white;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+
+.card:hover {
+    border-color: var(--primary);
+    box-shadow: 0 8px 24px rgba(124, 58, 237, 0.12);
+}
+
+/* Buttons - More contrast */
+.btn-primary {
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
+}
+
+.btn-primary:hover {
+    box-shadow: 0 8px 24px rgba(124, 58, 237, 0.3);
+}
+
+.btn-secondary {
+    background: rgba(0, 0, 0, 0.03);
+    color: var(--text-primary);
+    border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.btn-secondary:hover {
+    background: rgba(0, 0, 0, 0.05);
+    border-color: var(--primary);
+}
+
+/* Inputs - Lighter background */
+.input {
+    background: white;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: var(--text-primary);
+}
+
+/* Progress Bars */
+.progress-bar {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--primary);
+}
+
+/* Selection */
+::selection {
+    background: rgba(124, 58, 237, 0.2);
+}
+
+/* Links */
+a {
+    color: var(--primary-dark);
+}
+
+a:hover {
+    color: var(--primary);
+}
+
+/* Player Specific */
+.player-container {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.9));
+}
+
+.album-art {
+    border: 2px solid rgba(255, 255, 255, 0.5);
+}
+
+/* Lyrics */
+.lyrics-line.active {
+    color: var(--primary-dark);
+    text-shadow: 0 0 5px rgba(124, 58, 237, 0.2);
+}
+
+/* Notification */
+.notification {
+    background: white;
+    border-left: 4px solid var(--primary);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
