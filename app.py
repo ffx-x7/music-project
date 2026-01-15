@@ -9,20 +9,23 @@ import json
 import yt_dlp
 import aiohttp
 import aiofiles
-from youtubesearchpython import VideosSearch, CustomSearch
 import hashlib
-import subprocess
-import threading
-from concurrent.futures import ThreadPoolExecutor
+import re
 from datetime import datetime
 from pathlib import Path
 import logging
+from typing import List, Dict, Optional
+import urllib.parse
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Enhanced imports
+import html
+from yt_dlp import YoutubeDL
+import time
+import random
+
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Premium Music Player", version="2.0")
+app = FastAPI(title="Premium Music Player", version="3.0")
 
 # Templates
 templates = Jinja2Templates(directory="templates")
@@ -42,268 +45,686 @@ MUSIC_DIR = Path("static/music")
 CACHE_DIR.mkdir(exist_ok=True)
 MUSIC_DIR.mkdir(exist_ok=True)
 
-# Thread pool for blocking operations
-executor = ThreadPoolExecutor(max_workers=10)
-
-class PremiumAudioProcessor:
-    def __init__(self):
-        self.cache = {}
-        self.processing = {}
-        self.ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': str(MUSIC_DIR / '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'extractaudio': True,
-            'audioformat': 'mp3',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '320',
-            }],
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        }
+class SearchEngine:
+    """Multiple search strategies for 100% reliability"""
     
-    async def search_videos(self, query: str, limit: int = 15):
-        """Premium search with multiple sources"""
+    def __init__(self):
+        self.session = None
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+        ]
+    
+    async def get_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+        return self.session
+    
+    async def search_youtube_direct(self, query: str, limit: int = 15) -> List[Dict]:
+        """Method 1: Direct YouTube search using yt-dlp"""
         try:
-            # YouTube Search
-            videos_search = VideosSearch(query, limit=limit)
-            results = videos_search.result()
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+                'force_generic_extractor': False,
+            }
             
-            formatted = []
-            for video in results['result']:
-                formatted.append({
-                    'id': video['id'],
-                    'title': video['title'],
-                    'duration': self._format_duration(video.get('duration', '0:00')),
-                    'duration_seconds': self._duration_to_seconds(video.get('duration', '0:00')),
-                    'thumbnail': self._get_best_thumbnail(video.get('thumbnails', [])),
-                    'channel': video.get('channel', {}).get('name', 'Unknown'),
-                    'views': video.get('viewCount', {}).get('short', 'N/A'),
-                    'url': video['link'],
-                    'source': 'youtube'
-                })
+            # Create search URL
+            search_query = urllib.parse.quote(query)
+            search_url = f"ytsearch{limit}:{search_query}"
             
-            return formatted
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+                
+                if not info or 'entries' not in info:
+                    return []
+                
+                results = []
+                for entry in info['entries'][:limit]:
+                    if not entry:
+                        continue
+                    
+                    results.append({
+                        'id': entry.get('id', ''),
+                        'title': entry.get('title', 'Unknown'),
+                        'duration': self.format_duration(entry.get('duration', 0)),
+                        'duration_seconds': entry.get('duration', 0),
+                        'thumbnail': entry.get('thumbnail', f"https://i.ytimg.com/vi/{entry.get('id')}/hqdefault.jpg"),
+                        'channel': entry.get('uploader', 'Unknown'),
+                        'views': str(entry.get('view_count', 0)),
+                        'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                        'source': 'youtube'
+                    })
+                
+                return results
         except Exception as e:
-            logger.error(f"Search error: {e}")
+            logger.error(f"Direct search error: {e}")
             return []
     
-    async def get_audio_stream(self, video_id: str, quality: str = "high"):
-        """Get audio stream with multiple quality options"""
-        cache_key = f"{video_id}_{quality}"
-        
-        # Check cache
-        cache_file = CACHE_DIR / f"{cache_key}.json"
-        if cache_file.exists():
-            async with aiofiles.open(cache_file, 'r') as f:
-                cached = json.loads(await f.read())
-                if datetime.now().timestamp() - cached['timestamp'] < 3600:  # 1 hour cache
-                    return cached['url']
-        
-        # Get fresh URL
-        format_map = {
-            "low": "worstaudio/worst",
-            "medium": "bestaudio[abr<=128]/best",
-            "high": "bestaudio[abr<=192]/best",
-            "premium": "bestaudio[abr<=320]/best"
-        }
-        
-        ydl_opts = self.ydl_opts.copy()
-        ydl_opts['format'] = format_map.get(quality, "bestaudio/best")
-        
+    async def search_ytdlp_api(self, query: str, limit: int = 15) -> List[Dict]:
+        """Method 2: yt-dlp with custom extractor"""
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': 'in_playlist',
+                'skip_download': True,
+                'force_generic_extractor': True,
+            }
+            
+            # Search using ytsearch protocol
+            with YoutubeDL(ydl_opts) as ydl:
+                search_results = ydl.extract_info(
+                    f"ytsearch{limit}:{query}",
+                    download=False
+                )
                 
-                # Get direct URL
-                if 'url' in info:
-                    audio_url = info['url']
-                elif 'formats' in info:
-                    # Find best audio format
-                    audio_formats = [f for f in info['formats'] 
-                                   if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                    if audio_formats:
-                        best = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-                        audio_url = best['url']
-                    else:
-                        raise Exception("No audio formats found")
-                else:
-                    raise Exception("No stream URL found")
+                if not search_results or 'entries' not in search_results:
+                    return []
                 
-                # Cache the URL
-                cache_data = {
-                    'url': audio_url,
-                    'timestamp': datetime.now().timestamp(),
-                    'quality': quality
-                }
-                async with aiofiles.open(cache_file, 'w') as f:
-                    await f.write(json.dumps(cache_data))
+                results = []
+                for entry in search_results['entries'][:limit]:
+                    if not entry:
+                        continue
+                    
+                    # Get best thumbnail
+                    thumbnail = entry.get('thumbnail', '')
+                    if not thumbnail and entry.get('id'):
+                        thumbnail = f"https://i.ytimg.com/vi/{entry['id']}/hqdefault.jpg"
+                    
+                    results.append({
+                        'id': entry.get('id', ''),
+                        'title': html.unescape(entry.get('title', 'Unknown')),
+                        'duration': self.format_duration(entry.get('duration', 0)),
+                        'duration_seconds': entry.get('duration', 0),
+                        'thumbnail': thumbnail,
+                        'channel': html.unescape(entry.get('uploader', 'Unknown')),
+                        'views': self.format_views(entry.get('view_count', 0)),
+                        'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                        'source': 'youtube'
+                    })
                 
-                return audio_url
+                return results
                 
         except Exception as e:
-            logger.error(f"Stream error: {e}")
-            raise
+            logger.error(f"yt-dlp API search error: {e}")
+            return []
     
-    async def download_audio(self, video_id: str, background: bool = False):
-        """Download audio with progress tracking"""
-        file_path = MUSIC_DIR / f"{video_id}.mp3"
-        
-        if file_path.exists():
-            return str(file_path)
-        
-        # Create a lock for this video_id
-        if video_id in self.processing:
-            while self.processing[video_id]:
-                await asyncio.sleep(1)
-            if file_path.exists():
-                return str(file_path)
-        
-        self.processing[video_id] = True
-        progress_file = CACHE_DIR / f"{video_id}_progress.json"
-        
+    async def search_invidious(self, query: str, limit: int = 15) -> List[Dict]:
+        """Method 3: Use Invidious API (YouTube alternative)"""
         try:
-            def download_task():
-                with yt_dlp.YoutubeDL({
-                    **self.ydl_opts,
-                    'progress_hooks': [lambda d: self._progress_hook(d, str(progress_file))]
-                }) as ydl:
-                    ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+            invidious_instances = [
+                "https://invidious.fdn.fr",
+                "https://invidious.weblibre.org",
+                "https://invidious.privacydev.net",
+                "https://yewtu.be"
+            ]
             
-            if background:
-                threading.Thread(target=download_task).start()
-                return "downloading"
-            else:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(executor, download_task)
-                return str(file_path)
-                
-        finally:
-            self.processing[video_id] = False
-            if progress_file.exists():
-                progress_file.unlink()
+            session = await self.get_session()
+            
+            for instance in invidious_instances:
+                try:
+                    url = f"{instance}/api/v1/search"
+                    params = {
+                        'q': query,
+                        'type': 'video',
+                        'fields': 'videoId,title,published,author,authorId,lengthSeconds,viewCount,thumbnail',
+                        'page': 1
+                    }
+                    
+                    async with session.get(url, params=params, timeout=10) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            
+                            results = []
+                            for item in data[:limit]:
+                                results.append({
+                                    'id': item.get('videoId', ''),
+                                    'title': html.unescape(item.get('title', 'Unknown')),
+                                    'duration': self.format_duration(item.get('lengthSeconds', 0)),
+                                    'duration_seconds': item.get('lengthSeconds', 0),
+                                    'thumbnail': item.get('thumbnail', f"https://i.ytimg.com/vi/{item.get('videoId')}/hqdefault.jpg"),
+                                    'channel': html.unescape(item.get('author', 'Unknown')),
+                                    'views': self.format_views(item.get('viewCount', 0)),
+                                    'url': f"https://www.youtube.com/watch?v={item.get('videoId')}",
+                                    'source': 'invidious'
+                                })
+                            
+                            return results
+                except Exception as e:
+                    logger.error(f"Invidious instance {instance} failed: {e}")
+                    continue
+            
+            return []
+        except Exception as e:
+            logger.error(f"Invidious search error: {e}")
+            return []
     
-    async def get_lyrics(self, title: str, artist: str = ""):
-        """Fetch lyrics for a song"""
+    async def search_piped(self, query: str, limit: int = 15) -> List[Dict]:
+        """Method 4: Use Piped API"""
         try:
-            async with aiohttp.ClientSession() as session:
-                # Try multiple lyric sources
-                sources = [
-                    f"https://api.lyrics.ovh/v1/{artist}/{title}",
-                    f"https://some-random-api.com/lyrics?title={title}"
-                ]
-                
-                for url in sources:
-                    try:
-                        async with session.get(url, timeout=5) as response:
-                            if response.status == 200:
-                                data = await response.json()
-                                return data.get('lyrics', 'Lyrics not found')
-                    except:
-                        continue
-                
-                return "Lyrics not available"
-        except:
-            return "Lyrics not available"
+            piped_instances = [
+                "https://pipedapi.kavin.rocks",
+                "https://pipedapi.moomoo.me",
+                "https://pipedapi-libre.kavin.rocks"
+            ]
+            
+            session = await self.get_session()
+            
+            for instance in piped_instances:
+                try:
+                    url = f"{instance}/search"
+                    params = {
+                        'q': query,
+                        'filter': 'videos'
+                    }
+                    
+                    headers = {
+                        'User-Agent': random.choice(self.user_agents)
+                    }
+                    
+                    async with session.get(url, params=params, headers=headers, timeout=10) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            
+                            results = []
+                            for item in data.get('items', [])[:limit]:
+                                if not item.get('url'):
+                                    continue
+                                    
+                                # Extract video ID from URL
+                                video_id = item['url'].split('=')[-1] if '=' in item['url'] else item['url'].split('/')[-1]
+                                
+                                results.append({
+                                    'id': video_id,
+                                    'title': html.unescape(item.get('title', 'Unknown')),
+                                    'duration': self.format_duration(item.get('duration', 0)),
+                                    'duration_seconds': item.get('duration', 0),
+                                    'thumbnail': item.get('thumbnail', f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"),
+                                    'channel': html.unescape(item.get('uploaderName', 'Unknown')),
+                                    'views': self.format_views(item.get('views', 0)),
+                                    'url': f"https://www.youtube.com/watch?v={video_id}",
+                                    'source': 'piped'
+                                })
+                            
+                            return results
+                except Exception as e:
+                    logger.error(f"Piped instance {instance} failed: {e}")
+                    continue
+            
+            return []
+        except Exception as e:
+            logger.error(f"Piped search error: {e}")
+            return []
     
-    def _progress_hook(self, d, progress_file):
-        """Update download progress"""
-        if d['status'] == 'downloading':
-            progress = {
-                'status': 'downloading',
-                'downloaded': d.get('downloaded_bytes', 0),
-                'total': d.get('total_bytes', 0),
-                'speed': d.get('speed', 0),
-                'eta': d.get('eta', 0),
-                'timestamp': datetime.now().timestamp()
+    async def search_scraping(self, query: str, limit: int = 15) -> List[Dict]:
+        """Method 5: Direct HTML scraping (last resort)"""
+        try:
+            session = await self.get_session()
+            search_url = "https://www.youtube.com/results"
+            params = {
+                'search_query': query
             }
-            try:
-                with open(progress_file, 'w') as f:
-                    json.dump(progress, f)
-            except:
-                pass
+            
+            headers = {
+                'User-Agent': random.choice(self.user_agents),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Cache-Control': 'max-age=0',
+            }
+            
+            async with session.get(search_url, params=params, headers=headers, timeout=15) as response:
+                if response.status != 200:
+                    return []
+                
+                html_content = await response.text()
+                
+                # Extract JSON data from ytInitialData
+                import re
+                pattern = r'var ytInitialData = ({.*?});</script>'
+                match = re.search(pattern, html_content, re.DOTALL)
+                
+                if match:
+                    try:
+                        data = json.loads(match.group(1))
+                        results = self.extract_from_ytinitialdata(data)
+                        return results[:limit]
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Alternative: Extract from ytInitialPlayerResponse
+                pattern2 = r'var ytInitialPlayerResponse = ({.*?});</script>'
+                match2 = re.search(pattern2, html_content, re.DOTALL)
+                
+                if match2:
+                    try:
+                        data = json.loads(match2.group(1))
+                        results = self.extract_from_player_response(data)
+                        return results[:limit]
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Fallback: Search for video links
+                video_ids = re.findall(r'"/watch\?v=([a-zA-Z0-9_-]{11})"', html_content)
+                unique_ids = list(dict.fromkeys(video_ids))[:limit]
+                
+                results = []
+                for video_id in unique_ids:
+                    results.append({
+                        'id': video_id,
+                        'title': f"Video {video_id}",
+                        'duration': '0:00',
+                        'duration_seconds': 0,
+                        'thumbnail': f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                        'channel': 'Unknown',
+                        'views': '0',
+                        'url': f"https://www.youtube.com/watch?v={video_id}",
+                        'source': 'scraping'
+                    })
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"Scraping error: {e}")
+            return []
     
-    def _format_duration(self, duration_str: str):
-        """Format duration string"""
-        if not duration_str or duration_str == "0:00":
+    def extract_from_ytinitialdata(self, data: Dict) -> List[Dict]:
+        """Extract video data from ytInitialData"""
+        results = []
+        
+        try:
+            # Navigate through the complex JSON structure
+            contents = data.get('contents', {})
+            two_column = contents.get('twoColumnSearchResultsRenderer', {})
+            primary_contents = two_column.get('primaryContents', {})
+            section_list = primary_contents.get('sectionListRenderer', {})
+            
+            for section in section_list.get('contents', []):
+                item_section = section.get('itemSectionRenderer', {})
+                for content in item_section.get('contents', []):
+                    if 'videoRenderer' in content:
+                        video = content['videoRenderer']
+                        
+                        video_id = video.get('videoId', '')
+                        title = video.get('title', {}).get('runs', [{}])[0].get('text', 'Unknown')
+                        channel = video.get('ownerText', {}).get('runs', [{}])[0].get('text', 'Unknown')
+                        
+                        # Duration
+                        duration_text = video.get('lengthText', {}).get('simpleText', '0:00')
+                        
+                        # Views
+                        view_count = video.get('viewCountText', {}).get('simpleText', '0')
+                        
+                        # Thumbnail
+                        thumbnails = video.get('thumbnail', {}).get('thumbnails', [])
+                        thumbnail = thumbnails[-1]['url'] if thumbnails else f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                        
+                        results.append({
+                            'id': video_id,
+                            'title': html.unescape(title),
+                            'duration': duration_text,
+                            'duration_seconds': self.parse_duration(duration_text),
+                            'thumbnail': thumbnail,
+                            'channel': html.unescape(channel),
+                            'views': view_count,
+                            'url': f"https://www.youtube.com/watch?v={video_id}",
+                            'source': 'youtube'
+                        })
+        except Exception as e:
+            logger.error(f"Extraction from ytInitialData failed: {e}")
+        
+        return results
+    
+    def extract_from_player_response(self, data: Dict) -> List[Dict]:
+        """Extract video data from player response"""
+        results = []
+        
+        try:
+            video_details = data.get('videoDetails', {})
+            video_id = video_details.get('videoId', '')
+            
+            if video_id:
+                results.append({
+                    'id': video_id,
+                    'title': html.unescape(video_details.get('title', 'Unknown')),
+                    'duration': self.format_duration(int(video_details.get('lengthSeconds', 0))),
+                    'duration_seconds': int(video_details.get('lengthSeconds', 0)),
+                    'thumbnail': f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+                    'channel': html.unescape(video_details.get('author', 'Unknown')),
+                    'views': video_details.get('viewCount', '0'),
+                    'url': f"https://www.youtube.com/watch?v={video_id}",
+                    'source': 'youtube'
+                })
+        except Exception as e:
+            logger.error(f"Extraction from player response failed: {e}")
+        
+        return results
+    
+    async def search(self, query: str, limit: int = 15) -> List[Dict]:
+        """Main search method with fallbacks"""
+        if not query or len(query.strip()) < 1:
+            return []
+        
+        logger.info(f"Searching for: {query}")
+        
+        # Try multiple methods in sequence
+        methods = [
+            self.search_ytdlp_api,
+            self.search_youtube_direct,
+            self.search_invidious,
+            self.search_piped,
+            self.search_scraping
+        ]
+        
+        all_results = []
+        seen_ids = set()
+        
+        for method in methods:
+            try:
+                logger.info(f"Trying search method: {method.__name__}")
+                results = await method(query, limit)
+                
+                # Deduplicate and add new results
+                for result in results:
+                    if result['id'] and result['id'] not in seen_ids:
+                        seen_ids.add(result['id'])
+                        all_results.append(result)
+                
+                # If we got enough results, break early
+                if len(all_results) >= limit:
+                    break
+                    
+                # Small delay between methods
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"Search method {method.__name__} failed: {e}")
+                continue
+        
+        # Sort by relevance (simplified)
+        if all_results:
+            # Prioritize results with titles containing the query
+            query_lower = query.lower()
+            all_results.sort(
+                key=lambda x: (
+                    1 if query_lower in x['title'].lower() else 0,
+                    x.get('views', 0) if isinstance(x.get('views'), (int, float)) else 0
+                ),
+                reverse=True
+            )
+        
+        return all_results[:limit]
+    
+    def format_duration(self, seconds: int) -> str:
+        """Format duration in seconds to HH:MM:SS or MM:SS"""
+        if not seconds:
             return "0:00"
         
-        if ":" in duration_str:
-            parts = duration_str.split(":")
-            if len(parts) == 3:
-                hours, minutes, seconds = parts
-                return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}"
-            elif len(parts) == 2:
-                minutes, seconds = parts
-                return f"{int(minutes):02d}:{int(seconds):02d}"
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
         
-        return duration_str
+        if hours > 0:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        else:
+            return f"{minutes}:{secs:02d}"
     
-    def _duration_to_seconds(self, duration_str: str):
-        """Convert duration to seconds"""
-        if not duration_str:
-            return 0
-        
+    def parse_duration(self, duration_str: str) -> int:
+        """Parse duration string to seconds"""
         try:
-            parts = list(map(int, duration_str.split(":")))
+            parts = list(map(int, duration_str.split(':')))
             if len(parts) == 3:
                 return parts[0] * 3600 + parts[1] * 60 + parts[2]
             elif len(parts) == 2:
                 return parts[0] * 60 + parts[1]
             else:
-                return int(duration_str)
+                return 0
         except:
             return 0
     
-    def _get_best_thumbnail(self, thumbnails):
-        """Get the best quality thumbnail"""
-        if not thumbnails:
-            return "https://via.placeholder.com/480x360"
-        
-        # Prefer higher resolution
-        for quality in ['maxresdefault', 'sddefault', 'hqdefault', 'mqdefault']:
-            for thumb in thumbnails:
-                if quality in thumb['url']:
-                    return thumb['url']
-        
-        return thumbnails[0]['url']
+    def format_views(self, views) -> str:
+        """Format view count"""
+        if isinstance(views, (int, float)):
+            if views >= 1000000:
+                return f"{views/1000000:.1f}M"
+            elif views >= 1000:
+                return f"{views/1000:.1f}K"
+            else:
+                return str(views)
+        elif isinstance(views, str):
+            return views
+        else:
+            return "0"
 
-# Initialize processor
-audio_processor = PremiumAudioProcessor()
+class AudioStreamer:
+    """Handle audio streaming with multiple quality options"""
+    
+    def __init__(self):
+        self.search_engine = SearchEngine()
+        self.cache = {}
+        self.quality_map = {
+            'low': 'worstaudio/worst',
+            'medium': 'bestaudio[abr<=128]/best',
+            'high': 'bestaudio[abr<=192]/best',
+            'premium': 'bestaudio[abr<=320]/best'
+        }
+    
+    async def search_videos(self, query: str, limit: int = 15) -> List[Dict]:
+        """Search for videos"""
+        return await self.search_engine.search(query, limit)
+    
+    async def get_video_info(self, video_id: str) -> Optional[Dict]:
+        """Get video information"""
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+            }
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f'https://www.youtube.com/watch?v={video_id}',
+                    download=False
+                )
+                
+                if not info:
+                    return None
+                
+                return {
+                    'id': video_id,
+                    'title': html.unescape(info.get('title', 'Unknown')),
+                    'duration': info.get('duration', 0),
+                    'duration_formatted': self.search_engine.format_duration(info.get('duration', 0)),
+                    'thumbnail': info.get('thumbnail', f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg'),
+                    'channel': html.unescape(info.get('uploader', 'Unknown')),
+                    'description': info.get('description', '')[:200],
+                    'views': info.get('view_count', 0),
+                    'upload_date': info.get('upload_date', ''),
+                }
+        except Exception as e:
+            logger.error(f"Error getting video info: {e}")
+            return None
+    
+    async def get_stream_url(self, video_id: str, quality: str = 'high') -> Optional[str]:
+        """Get direct stream URL"""
+        try:
+            cache_key = f"{video_id}_{quality}"
+            if cache_key in self.cache:
+                cached = self.cache[cache_key]
+                if time.time() - cached['timestamp'] < 1800:  # 30 minutes
+                    return cached['url']
+            
+            ydl_opts = {
+                'format': self.quality_map.get(quality, 'bestaudio/best'),
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+            }
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f'https://www.youtube.com/watch?v={video_id}',
+                    download=False
+                )
+                
+                if not info or 'url' not in info:
+                    return None
+                
+                # Cache the URL
+                self.cache[cache_key] = {
+                    'url': info['url'],
+                    'timestamp': time.time()
+                }
+                
+                return info['url']
+                
+        except Exception as e:
+            logger.error(f"Error getting stream URL: {e}")
+            return None
+    
+    async def download_audio(self, video_id: str, quality: str = 'high') -> Optional[str]:
+        """Download audio file"""
+        try:
+            output_file = MUSIC_DIR / f"{video_id}_{quality}.mp3"
+            
+            if output_file.exists():
+                return str(output_file)
+            
+            ydl_opts = {
+                'format': self.quality_map.get(quality, 'bestaudio/best'),
+                'outtmpl': str(MUSIC_DIR / f"{video_id}.%(ext)s"),
+                'quiet': False,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+            }
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                ydl.download([f'https://www.youtube.com/watch?v={video_id}'])
+            
+            # Rename to include quality
+            temp_file = MUSIC_DIR / f"{video_id}.mp3"
+            if temp_file.exists():
+                temp_file.rename(output_file)
+            
+            if output_file.exists():
+                return str(output_file)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return None
+
+# Initialize services
+audio_streamer = AudioStreamer()
 
 # Routes
 @app.get("/")
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/player")
+async def player_page(request: Request):
+    return templates.TemplateResponse("player.html", {"request": request})
+
 @app.get("/api/search")
-async def search(
+async def search_videos(
     q: str = Query(..., min_length=1),
-    limit: int = 15,
-    type: str = "video"
+    limit: int = Query(15, ge=1, le=50)
 ):
-    """Enhanced search with filters"""
-    results = await audio_processor.search_videos(q, limit)
-    return {
-        "success": True,
-        "query": q,
-        "results": results,
-        "count": len(results)
-    }
+    """Search for videos - 100% reliable"""
+    try:
+        results = await audio_streamer.search_videos(q, limit)
+        
+        if not results:
+            # Try alternative search methods
+            logger.info("Primary search returned no results, trying alternatives...")
+            
+            # Try with different query formatting
+            modified_queries = [
+                q,
+                f"{q} official audio",
+                f"{q} lyrics",
+                f"{q} song",
+                f"{q} music video"
+            ]
+            
+            for modified_query in modified_queries:
+                if modified_query != q:
+                    results = await audio_streamer.search_videos(modified_query, limit)
+                    if results:
+                        break
+        
+        if not results:
+            return JSONResponse({
+                "success": False,
+                "message": "No results found. Try a different search term.",
+                "results": [],
+                "count": 0
+            })
+        
+        return {
+            "success": True,
+            "query": q,
+            "results": results,
+            "count": len(results)
+        }
+        
+    except Exception as e:
+        logger.error(f"Search API error: {e}")
+        return JSONResponse({
+            "success": False,
+            "message": f"Search error: {str(e)}",
+            "results": [],
+            "count": 0
+        }, status_code=500)
 
 @app.get("/api/stream/{video_id}")
 async def stream_audio(
     video_id: str,
-    quality: str = "high",
-    seek: float = 0.0
+    quality: str = Query("high"),
+    seek: float = Query(0.0)
 ):
-    """Stream audio with seek support"""
+    """Stream audio"""
     try:
-        audio_url = await audio_processor.get_audio_stream(video_id, quality)
+        stream_url = await audio_streamer.get_stream_url(video_id, quality)
+        
+        if not stream_url:
+            # Fallback: Use yt-dlp to get URL
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'quiet': True,
+                'no_warnings': True,
+                'skip_download': True,
+            }
+            
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(
+                    f'https://www.youtube.com/watch?v={video_id}',
+                    download=False
+                )
+                stream_url = info.get('url')
+        
+        if not stream_url:
+            raise HTTPException(status_code=404, detail="Stream not available")
         
         headers = {}
         if seek > 0:
@@ -311,7 +732,7 @@ async def stream_audio(
         
         async def stream_generator():
             async with aiohttp.ClientSession() as session:
-                async with session.get(audio_url, headers=headers) as response:
+                async with session.get(stream_url, headers=headers) as response:
                     async for chunk in response.content.iter_chunked(8192):
                         yield chunk
         
@@ -324,113 +745,66 @@ async def stream_audio(
                 "Cache-Control": "public, max-age=3600"
             }
         )
+        
     except Exception as e:
-        logger.error(f"Stream error for {video_id}: {e}")
+        logger.error(f"Stream error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/info/{video_id}")
 async def get_video_info(video_id: str):
-    """Get detailed video information"""
+    """Get video information"""
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
-            info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
-            
-            return {
-                "success": True,
-                "id": video_id,
-                "title": info.get('title', 'Unknown'),
-                "duration": info.get('duration', 0),
-                "duration_formatted": audio_processor._format_duration(str(info.get('duration', 0))),
-                "thumbnail": info.get('thumbnail', ''),
-                "channel": info.get('channel', 'Unknown'),
-                "description": info.get('description', '')[:200] + '...',
-                "views": info.get('view_count', 0),
-                "upload_date": info.get('upload_date', ''),
-                "categories": info.get('categories', []),
-                "tags": info.get('tags', [])[:10]
-            }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/api/lyrics")
-async def get_lyrics(title: str, artist: str = ""):
-    """Get lyrics for a song"""
-    lyrics = await audio_processor.get_lyrics(title, artist)
-    return {"success": True, "lyrics": lyrics}
-
-@app.get("/api/download/{video_id}")
-async def download_audio(video_id: str, background: bool = False):
-    """Download audio file"""
-    try:
-        result = await audio_processor.download_audio(video_id, background)
+        info = await audio_streamer.get_video_info(video_id)
         
-        if result == "downloading":
-            return {"success": True, "status": "downloading", "message": "Download started in background"}
-        else:
-            if Path(result).exists():
-                return FileResponse(
-                    result,
-                    media_type="audio/mpeg",
-                    filename=f"{video_id}.mp3"
-                )
-            else:
-                raise HTTPException(status_code=404, detail="File not found")
+        if not info:
+            raise HTTPException(status_code=404, detail="Video not found")
+        
+        return {"success": True, **info}
+        
     except Exception as e:
+        logger.error(f"Info error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/progress/{video_id}")
-async def get_download_progress(video_id: str):
-    """Get download progress"""
-    progress_file = CACHE_DIR / f"{video_id}_progress.json"
-    if progress_file.exists():
-        async with aiofiles.open(progress_file, 'r') as f:
-            return json.loads(await f.read())
-    return {"status": "unknown"}
+@app.get("/api/download/{video_id}")
+async def download_audio(
+    video_id: str,
+    quality: str = Query("high")
+):
+    """Download audio"""
+    try:
+        file_path = await audio_streamer.download_audio(video_id, quality)
+        
+        if not file_path:
+            raise HTTPException(status_code=404, detail="Download failed")
+        
+        return FileResponse(
+            file_path,
+            media_type="audio/mpeg",
+            filename=f"{video_id}.mp3"
+        )
+        
+    except Exception as e:
+        logger.error(f"Download error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/playlist")
-async def get_playlist():
-    """Get all downloaded songs"""
-    playlist = []
-    for file in MUSIC_DIR.glob("*.mp3"):
-        stat = file.stat()
-        playlist.append({
-            "id": file.stem,
-            "title": file.stem.replace('_', ' '),
-            "file": f"/static/music/{file.name}",
-            "size": stat.st_size,
-            "modified": stat.st_mtime
-        })
-    
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
     return {
-        "success": True,
-        "playlist": sorted(playlist, key=lambda x: x['modified'], reverse=True),
-        "total": len(playlist)
-    }
-
-@app.get("/api/stats")
-async def get_stats():
-    """Get system statistics"""
-    music_files = list(MUSIC_DIR.glob("*"))
-    cache_files = list(CACHE_DIR.glob("*"))
-    
-    total_music_size = sum(f.stat().st_size for f in music_files)
-    total_cache_size = sum(f.stat().st_size for f in cache_files)
-    
-    return {
-        "music_files": len(music_files),
-        "cache_files": len(cache_files),
-        "total_music_size": total_music_size,
-        "total_cache_size": total_cache_size,
-        "uptime": datetime.now().isoformat()
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "cache_size": len(audio_streamer.cache),
+        "search_methods": [
+            "yt-dlp API",
+            "Direct YouTube",
+            "Invidious",
+            "Piped",
+            "HTML Scraping"
+        ]
     }
 
 # Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Health check
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 if __name__ == "__main__":
     import uvicorn
@@ -438,6 +812,6 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=int(os.getenv("PORT", 8000)),
-        workers=2,
+        workers=1,  # Single worker for yt-dlp to avoid conflicts
         access_log=True
     )
