@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+yt-dlp
+requests
+pydantic
+python-multipart
+aiohttp
+aiosqlite
+python-dotenv
+beautifulsoup4
+youtubesearchpython
