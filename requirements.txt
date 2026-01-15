@@ -8,4 +8,5 @@ aiohttp
 aiosqlite
 python-dotenv
 beautifulsoup4
-youtubesearchpython
+
+youtube-search-python
