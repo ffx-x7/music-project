@@ -6,6 +6,8 @@ pydantic
 python-multipart
 aiohttp
 aiosqlite
+aiofiles
 python-dotenv
 beautifulsoup4
-youtubesearchpython
+jinja2
+youtube-search-python
